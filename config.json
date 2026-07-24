@@ -1,0 +1,24 @@
+{
+  "defaults": {
+    "output_dir": "downloads",
+    "caption_langs": ["en", "en-orig"],
+    "all_captions": false,
+    "video_format": "bestvideo+bestaudio/best",
+    "fallback_video_formats": ["best[ext=mp4]", "best"],
+    "live_video_format": "best[ext=mp4]/best",
+    "live_fallback_video_formats": ["best", "worst[ext=mp4]/worst"],
+    "retries_per_format": 2,
+    "merge_output_format": "mp4",
+    "friendly_errors": true
+  },
+  "error_messages": {
+    "invalid_url": "The URL could not be read as a valid YouTube video link.",
+    "http_403": "YouTube blocked this video stream request (HTTP 403). Try again later, update yt-dlp, or change video format in config.",
+    "http_429": "Too many requests (HTTP 429). Wait a bit and try again.",
+    "ffmpeg_missing": "ffmpeg is not installed or not on PATH. Install ffmpeg to enable clip export.",
+    "invalid_time_range": "End time must be greater than start time.",
+    "invalid_time_format": "Time must be SS, MM:SS, or HH:MM:SS.",
+    "captions_failed": "Captions could not be downloaded. Continuing with video only.",
+    "generic": "The download failed. Please try again in a moment."
+  }
+}
