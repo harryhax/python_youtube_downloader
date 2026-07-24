@@ -9,6 +9,16 @@
     "live_fallback_video_formats": ["best", "worst[ext=mp4]/worst"],
     "retries_per_format": 2,
     "merge_output_format": "mp4",
+    "video_encoder": "h264_videotoolbox",
+    "fallback_video_encoder": "libx264",
+    "auto_edit": false,
+    "speech_padding_seconds": 2.5,
+    "silence_threshold_db": -35,
+    "min_silence_duration": 0.7,
+    "min_speech_duration": 0.2,
+    "auto_edit_max_input_minutes": null,
+    "caption_auto_edit_audit": false,
+    "auto_edit_suffix": "_truncated",
     "friendly_errors": true
   },
   "error_messages": {
@@ -16,8 +26,10 @@
     "http_403": "YouTube blocked this video stream request (HTTP 403). Try again later, update yt-dlp, or change video format in config.",
     "http_429": "Too many requests (HTTP 429). Wait a bit and try again.",
     "ffmpeg_missing": "ffmpeg is not installed or not on PATH. Install ffmpeg to enable clip export.",
+    "ffprobe_missing": "ffprobe is not installed or not on PATH. Install ffmpeg to enable auto-edit.",
     "invalid_time_range": "End time must be greater than start time.",
     "invalid_time_format": "Time must be SS, MM:SS, or HH:MM:SS.",
+    "no_speech_segments": "No talking segments were detected with current silence settings.",
     "captions_failed": "Captions could not be downloaded. Continuing with video only.",
     "generic": "The download failed. Please try again in a moment."
   }
