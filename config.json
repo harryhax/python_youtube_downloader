@@ -18,6 +18,13 @@
     "min_speech_duration": 0.2,
     "auto_edit_max_input_minutes": null,
     "caption_auto_edit_audit": false,
+    "funny_caption_model": "google/flan-t5-small",
+    "funny_caption_score_threshold": 3.5,
+    "funny_caption_window_max_gap_seconds": 1.0,
+    "funny_caption_window_max_duration_seconds": 12.0,
+    "funny_caption_window_min_chars": 20,
+    "funny_caption_max_new_tokens": 16,
+    "funny_caption_audit": true,
     "auto_edit_suffix": "_truncated",
     "friendly_errors": true
   },

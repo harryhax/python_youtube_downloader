@@ -30,6 +30,13 @@ DEFAULT_CONFIG = {
         "min_speech_duration": 0.2,
         "auto_edit_max_input_minutes": None,
         "caption_auto_edit_audit": False,
+        "funny_caption_model": "google/flan-t5-small",
+        "funny_caption_score_threshold": 3.5,
+        "funny_caption_window_max_gap_seconds": 1.0,
+        "funny_caption_window_max_duration_seconds": 12.0,
+        "funny_caption_window_min_chars": 20,
+        "funny_caption_max_new_tokens": 16,
+        "funny_caption_audit": True,
         "auto_edit_suffix": "_truncated",
         "friendly_errors": True,
     },
@@ -43,8 +50,10 @@ DEFAULT_CONFIG = {
         "invalid_time_format": "Time must be SS, MM:SS, or HH:MM:SS.",
         "no_speech_segments": "No talking segments were detected with current silence settings.",
         "no_caption_segments": "No caption segments were detected with current caption settings.",
+        "no_funny_segments": "No funny caption segments were detected with current settings.",
         "captions_not_found": "No downloaded caption file was found for caption-based auto-edit.",
         "captions_failed": "Captions could not be downloaded. Continuing with video only.",
+        "transformers_missing": "Install transformers/torch to enable local funny-caption editing.",
         "generic": "The download failed. Please try again in a moment.",
     },
 }
@@ -88,8 +97,15 @@ def friendly_error_message(exc: Exception, error_messages: dict) -> str:
         return error_messages["no_speech_segments"]
     if "no caption segments were detected" in message:
         return error_messages["no_caption_segments"]
+    if "no funny caption segments were detected" in message:
+        return error_messages.get("no_funny_segments", "No funny caption segments were detected.")
     if "could not locate downloaded caption file" in message:
         return error_messages["captions_not_found"]
+    if "transformers is not installed" in message:
+        return error_messages.get(
+            "transformers_missing",
+            "Install transformers/torch to enable local funny-caption editing.",
+        )
     return f"{error_messages['generic']} ({exc})"
 
 
@@ -403,6 +419,271 @@ def extract_raw_caption_segments(
     return raw_segments
 
 
+def extract_caption_cues_with_text(
+    caption_path: Path,
+    duration_seconds: float,
+    source_start_offset_seconds: float = 0.0,
+) -> list[dict]:
+    lines = caption_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    cues: list[dict] = []
+    index = 0
+
+    while index < len(lines):
+        line = lines[index].strip()
+        if "-->" not in line:
+            index += 1
+            continue
+
+        start_text, end_text = [part.strip() for part in line.split("-->", 1)]
+        cue_start = parse_vtt_timestamp(start_text)
+        cue_end = parse_vtt_timestamp(end_text)
+
+        index += 1
+        cue_lines: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            cue_line = lines[index].strip()
+            if not cue_line.isdigit():
+                # Remove simple VTT tags for cleaner LLM input.
+                cue_lines.append(re.sub(r"<[^>]+>", "", cue_line))
+            index += 1
+
+        adjusted_start = max(0.0, cue_start - source_start_offset_seconds)
+        adjusted_end = min(duration_seconds, cue_end - source_start_offset_seconds)
+        cue_text = " ".join(cue_lines).strip()
+        if cue_text and adjusted_end > adjusted_start and adjusted_start < duration_seconds:
+            cues.append(
+                {
+                    "start": adjusted_start,
+                    "end": adjusted_end,
+                    "text": cue_text,
+                }
+            )
+
+        index += 1
+
+    return cues
+
+
+def build_caption_text_windows(
+    cues: list[dict],
+    max_gap_seconds: float,
+    max_window_seconds: float,
+    min_chars: int,
+) -> list[dict]:
+    if not cues:
+        return []
+
+    windows: list[dict] = []
+    current_start = cues[0]["start"]
+    current_end = cues[0]["end"]
+    current_text_parts = [cues[0]["text"]]
+
+    for cue in cues[1:]:
+        gap = cue["start"] - current_end
+        proposed_duration = cue["end"] - current_start
+        can_extend = gap <= max_gap_seconds and proposed_duration <= max_window_seconds
+
+        if can_extend:
+            current_end = cue["end"]
+            current_text_parts.append(cue["text"])
+            continue
+
+        current_text = " ".join(current_text_parts).strip()
+        if len(current_text) >= min_chars:
+            windows.append(
+                {
+                    "start": current_start,
+                    "end": current_end,
+                    "text": current_text,
+                }
+            )
+
+        current_start = cue["start"]
+        current_end = cue["end"]
+        current_text_parts = [cue["text"]]
+
+    current_text = " ".join(current_text_parts).strip()
+    if len(current_text) >= min_chars:
+        windows.append(
+            {
+                "start": current_start,
+                "end": current_end,
+                "text": current_text,
+            }
+        )
+
+    return windows
+
+
+def parse_funny_score(text: str) -> float:
+    match = re.search(r"\b([0-5](?:\.[0-9]+)?)\b", text)
+    if not match:
+        return 0.0
+    return float(match.group(1))
+
+
+def score_caption_windows_with_hf(
+    windows: list[dict],
+    model_name: str,
+    max_new_tokens: int,
+) -> list[dict]:
+    if not windows:
+        return []
+
+    try:
+        from transformers import pipeline
+    except Exception as exc:
+        raise RuntimeError("transformers is not installed") from exc
+
+    scorer = pipeline("text2text-generation", model=model_name)
+    scored_windows: list[dict] = []
+
+    for window in windows:
+        prompt = (
+            "Rate how funny this caption excerpt is from 0 to 5. "
+            "Return only a number.\n\n"
+            f"Caption excerpt:\n{window['text']}\n\n"
+            "Score:"
+        )
+        result = scorer(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            truncation=True,
+        )
+        raw_output = str(result[0].get("generated_text", "")).strip()
+        score = parse_funny_score(raw_output)
+        scored_windows.append(
+            {
+                **window,
+                "score": score,
+                "raw_model_output": raw_output,
+            }
+        )
+
+    return scored_windows
+
+
+def print_funny_caption_audit_report(
+    scored_windows: list[dict],
+    threshold: float,
+) -> None:
+    if not scored_windows:
+        print("\nFunny Caption Scoring: no windows were available for scoring.")
+        return
+
+    kept = [item for item in scored_windows if item["score"] >= threshold]
+    print("\nFunny Caption Scoring")
+    print(f"- Total scored windows: {len(scored_windows)}")
+    print(f"- Funny score threshold: {threshold:.2f}")
+    print(f"- Windows selected: {len(kept)}")
+
+    top_rows = sorted(scored_windows, key=lambda item: item["score"], reverse=True)[:10]
+    print("- Top scored windows:")
+    for idx, item in enumerate(top_rows, start=1):
+        preview = item["text"].replace("\n", " ").strip()
+        if len(preview) > 90:
+            preview = f"{preview[:87]}..."
+        print(
+            f"  {idx:02d}. {format_seconds_as_timestamp(item['start'])} -> "
+            f"{format_seconds_as_timestamp(item['end'])} | score={item['score']:.2f} | {preview}"
+        )
+
+
+def auto_edit_video_from_funny_captions(
+    input_path: Path,
+    caption_path: Path,
+    output_path: Path,
+    padding_seconds: float,
+    min_segment_duration: float,
+    funny_model_name: str,
+    funny_score_threshold: float,
+    funny_window_max_gap_seconds: float,
+    funny_window_max_duration_seconds: float,
+    funny_window_min_chars: int,
+    funny_max_new_tokens: int,
+    max_input_minutes: float | None = None,
+    source_start_offset_seconds: float = 0.0,
+    funny_audit: bool = False,
+    video_encoder: str = "h264_videotoolbox",
+    fallback_video_encoder: str = "libx264",
+) -> tuple[int, float, float]:
+    duration_seconds = get_video_duration_seconds(input_path)
+    if max_input_minutes is not None:
+        if max_input_minutes <= 0:
+            raise ValueError("max_input_minutes must be greater than 0")
+        duration_seconds = min(duration_seconds, max_input_minutes * 60)
+
+    print(
+        f"Funny-caption auto-edit processing window: {duration_seconds:.1f}s "
+        f"({'full video' if max_input_minutes is None else f'capped to {max_input_minutes:g} min'})"
+    )
+
+    raw_caption_segments = extract_raw_caption_segments(
+        caption_path,
+        duration_seconds,
+        source_start_offset_seconds,
+    )
+    old_timeline_segments = pad_and_merge_segments(
+        raw_caption_segments,
+        duration_seconds,
+        0.0,
+        0.0,
+    )
+
+    cues = extract_caption_cues_with_text(
+        caption_path,
+        duration_seconds,
+        source_start_offset_seconds,
+    )
+    windows = build_caption_text_windows(
+        cues,
+        funny_window_max_gap_seconds,
+        funny_window_max_duration_seconds,
+        funny_window_min_chars,
+    )
+    scored_windows = score_caption_windows_with_hf(
+        windows,
+        funny_model_name,
+        funny_max_new_tokens,
+    )
+
+    funny_raw_segments = [
+        (item["start"], item["end"])
+        for item in scored_windows
+        if item["score"] >= funny_score_threshold
+    ]
+    funny_segments = pad_and_merge_segments(
+        funny_raw_segments,
+        duration_seconds,
+        padding_seconds,
+        min_segment_duration,
+    )
+
+    if not funny_segments:
+        raise RuntimeError("No funny caption segments were detected with current settings")
+
+    segment_count, total_kept_seconds = render_video_segments(
+        input_path,
+        output_path,
+        funny_segments,
+        duration_seconds,
+        video_encoder,
+        fallback_video_encoder,
+    )
+
+    if funny_audit:
+        print_caption_audit_report(
+            caption_path,
+            old_timeline_segments,
+            funny_segments,
+            duration_seconds,
+        )
+        print_funny_caption_audit_report(scored_windows, funny_score_threshold)
+
+    return segment_count, total_kept_seconds, duration_seconds
+
+
 def print_caption_audit_report(
     caption_path: Path,
     old_timeline_segments: list[tuple[float, float]],
@@ -681,12 +962,20 @@ def download_video(
     merge_output_format: str = "mp4",
     auto_edit: bool = False,
     caption_based_auto_edit: bool = False,
+    funny_caption_auto_edit: bool = False,
     speech_padding_seconds: float = 2.5,
     silence_threshold_db: float = -35,
     min_silence_duration: float = 0.7,
     min_speech_duration: float = 0.2,
     auto_edit_max_input_minutes: float | None = None,
     caption_auto_edit_audit: bool = False,
+    funny_caption_model: str = "google/flan-t5-small",
+    funny_caption_score_threshold: float = 3.5,
+    funny_caption_window_max_gap_seconds: float = 1.0,
+    funny_caption_window_max_duration_seconds: float = 12.0,
+    funny_caption_window_min_chars: int = 20,
+    funny_caption_max_new_tokens: int = 16,
+    funny_caption_audit: bool = True,
     auto_edit_suffix: str = "_truncated",
     caption_failure_message: str = "Captions could not be downloaded. Continuing with video only.",
     video_encoder: str = "h264_videotoolbox",
@@ -882,6 +1171,33 @@ def download_video(
             f"(kept {kept_seconds:.1f}s / {total_seconds:.1f}s across {segment_count} segments, {percent_kept:.1f}%)"
         )
 
+    if funny_caption_auto_edit:
+        caption_path = find_downloaded_caption_file(video_output_path, video_id, subtitle_langs)
+        truncated_output_path = video_output_path / f"{safe_title}{auto_edit_suffix}_funny.mp4"
+        segment_count, kept_seconds, total_seconds = auto_edit_video_from_funny_captions(
+            post_process_input_path,
+            caption_path,
+            truncated_output_path,
+            speech_padding_seconds,
+            min_speech_duration,
+            funny_caption_model,
+            funny_caption_score_threshold,
+            funny_caption_window_max_gap_seconds,
+            funny_caption_window_max_duration_seconds,
+            funny_caption_window_min_chars,
+            funny_caption_max_new_tokens,
+            auto_edit_max_input_minutes,
+            clip_start_seconds,
+            funny_caption_audit,
+            video_encoder,
+            fallback_video_encoder,
+        )
+        percent_kept = (kept_seconds / total_seconds * 100) if total_seconds > 0 else 0
+        print(
+            f"Funny-caption auto-edited video created: {truncated_output_path} "
+            f"(kept {kept_seconds:.1f}s / {total_seconds:.1f}s across {segment_count} segments, {percent_kept:.1f}%)"
+        )
+
     print(f"Saved video and captions to: {video_output_path}")
 
 
@@ -922,6 +1238,12 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Create a truncated video using caption timing instead of audio silence detection",
+    )
+    parser.add_argument(
+        "--funny-caption-auto-edit",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Create a truncated video using local Hugging Face funny-caption scoring",
     )
     parser.add_argument(
         "--caption-auto-edit-audit",
@@ -972,6 +1294,9 @@ if __name__ == "__main__":
     caption_based_auto_edit = (
         False if args.caption_based_auto_edit is None else args.caption_based_auto_edit
     )
+    funny_caption_auto_edit = (
+        False if args.funny_caption_auto_edit is None else args.funny_caption_auto_edit
+    )
     caption_auto_edit_audit = (
         defaults.get("caption_auto_edit_audit", False)
         if args.caption_auto_edit_audit is None
@@ -1014,12 +1339,20 @@ if __name__ == "__main__":
             defaults["merge_output_format"],
             auto_edit,
             caption_based_auto_edit,
+            funny_caption_auto_edit,
             speech_padding_seconds,
             silence_threshold_db,
             min_silence_duration,
             min_speech_duration,
             defaults.get("auto_edit_max_input_minutes"),
             caption_auto_edit_audit,
+            defaults.get("funny_caption_model", "google/flan-t5-small"),
+            defaults.get("funny_caption_score_threshold", 3.5),
+            defaults.get("funny_caption_window_max_gap_seconds", 1.0),
+            defaults.get("funny_caption_window_max_duration_seconds", 12.0),
+            defaults.get("funny_caption_window_min_chars", 20),
+            defaults.get("funny_caption_max_new_tokens", 16),
+            defaults.get("funny_caption_audit", True),
             defaults["auto_edit_suffix"],
             error_messages["captions_failed"],
             defaults.get("video_encoder", "h264_videotoolbox"),

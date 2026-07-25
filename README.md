@@ -4,10 +4,13 @@ A simple Python script that downloads a YouTube video, downloads its captions, a
 
 It can also auto-edit the video by removing long no-talking sections and stitching the remaining speaking parts together.
 
+It also supports local Hugging Face caption scoring to keep only "funny" moments.
+
 ## Requirements
 
 - Python 3.10+
 - `ffmpeg` (only required when using `--start` and `--end` clip options)
+- `transformers`, `torch`, and `sentencepiece` for local Hugging Face funny-caption editing
 
 On macOS, you can install `ffmpeg` with Homebrew:
 
@@ -48,7 +51,14 @@ Example defaults in `config.json`:
 		"min_silence_duration": 0.7,
 		"min_speech_duration": 0.2,
 		"auto_edit_max_input_minutes": null,
-		"caption_auto_edit_audit": false
+		"caption_auto_edit_audit": false,
+		"funny_caption_model": "google/flan-t5-small",
+		"funny_caption_score_threshold": 3.5,
+		"funny_caption_window_max_gap_seconds": 1.0,
+		"funny_caption_window_max_duration_seconds": 12.0,
+		"funny_caption_window_min_chars": 20,
+		"funny_caption_max_new_tokens": 16,
+		"funny_caption_audit": true
 	}
 }
 ```
@@ -65,15 +75,15 @@ python3 video_menu.py
 
 Menu sections include:
 
-- Download workflows: plain download, clip export, voice-based auto-edit, caption-based auto-edit
-- Local file workflows: voice-based auto-edit, caption-based auto-edit, and caption timeline audit for existing downloaded files
+- Download workflows: plain download, clip export, voice-based auto-edit, caption-based auto-edit, and funny-caption auto-edit (local HF)
+- Local file workflows: voice-based auto-edit, caption-based auto-edit, funny-caption auto-edit (local HF), and caption timeline audit for existing downloaded files
 - Exit
 
 When using "Auto-edit an existing local video", you can optionally set a max input minutes value to test only the beginning of a long video.
 
 The local auto-edit menu items now list available video and caption files from `downloads/` so you can pick by number instead of typing full paths.
 
-Use menu option `7` for caption timeline audit only (stats, cuts, old vs new timeline) without rendering a new output video.
+Use menu option `9` for caption timeline audit only (stats, cuts, old vs new timeline) without rendering a new output video.
 
 ### Direct downloader CLI
 
@@ -147,6 +157,16 @@ python3 download_youtube_video.py "https://www.youtube.com/watch?v=VIDEO_ID" --c
 ```
 
 This mode uses downloaded caption cue timing instead of silence detection, which can be faster and easier to compare against the voice-based version.
+
+### Funny-caption auto-edit using local Hugging Face model
+
+```bash
+python3 download_youtube_video.py "https://www.youtube.com/watch?v=VIDEO_ID" --funny-caption-auto-edit
+```
+
+This mode uses a local Hugging Face model (`funny_caption_model` in config) to score caption text windows from 0-5 and only keep windows above `funny_caption_score_threshold`.
+
+First run can take longer while the model downloads to local cache.
 
 Performance note: if `max input minutes` is left as `none`, the editor processes the full source timeline, which can still take a while on long videos.
 
